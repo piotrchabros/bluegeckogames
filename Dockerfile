@@ -106,10 +106,22 @@ if (!defined('ABSPATH')) {
 require_once ABSPATH . 'wp-settings.php';
 WPCONFIG
 
+# Install WP-CLI for automated WordPress installation
+RUN curl -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+    && chmod +x /usr/local/bin/wp
+
+# Install MySQL client for DB readiness check
+RUN apt-get update && apt-get install -y --no-install-recommends default-mysql-client \
+    && rm -rf /var/lib/apt/lists/*
+
 # Set proper ownership
 RUN chown -R www-data:www-data /var/www/html
 
-# Entrypoint: configure Apache port from $PORT, fix MPM, then start
+# Create a lightweight healthcheck endpoint (does not load WordPress)
+RUN echo '<?php http_response_code(200); echo "ok";' > /var/www/html/healthz.php \
+    && chown www-data:www-data /var/www/html/healthz.php
+
+# Entrypoint: wait for DB, install WP if needed, configure Apache port, then start
 RUN cat > /usr/local/bin/wordpress-entrypoint.sh <<'ENTRY'
 #!/bin/sh
 set -e
@@ -125,6 +137,47 @@ sed -i "s/<VirtualHost \*:80>/<VirtualHost *:${PORT}>/" /etc/apache2/sites-enabl
 rm -f /etc/apache2/mods-enabled/mpm_event.* /etc/apache2/mods-enabled/mpm_worker.*
 ln -sf /etc/apache2/mods-available/mpm_prefork.load /etc/apache2/mods-enabled/mpm_prefork.load
 ln -sf /etc/apache2/mods-available/mpm_prefork.conf /etc/apache2/mods-enabled/mpm_prefork.conf
+
+# Wait for MySQL to be reachable (up to 60 seconds)
+echo "Waiting for database..."
+DB_HOST=$(php -r "echo getenv('WORDPRESS_DB_HOST') ?: 'localhost';")
+DB_USER=$(php -r "echo getenv('WORDPRESS_DB_USER') ?: 'root';")
+DB_PASS=$(php -r "echo getenv('WORDPRESS_DB_PASSWORD') ?: '';")
+DB_NAME=$(php -r "echo getenv('WORDPRESS_DB_NAME') ?: 'wordpress';")
+
+ATTEMPTS=0
+MAX_ATTEMPTS=30
+until mysqladmin ping -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" --silent 2>/dev/null; do
+    ATTEMPTS=$((ATTEMPTS + 1))
+    if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+        echo "ERROR: Database not reachable after ${MAX_ATTEMPTS} attempts. Starting Apache anyway..."
+        break
+    fi
+    echo "  DB not ready yet (attempt $ATTEMPTS/$MAX_ATTEMPTS)..."
+    sleep 2
+done
+echo "Database is reachable."
+
+# Auto-install WordPress if tables don't exist yet
+if ! su -s /bin/sh www-data -c "wp core is-installed --path=/var/www/html" 2>/dev/null; then
+    echo "WordPress not installed. Running auto-install..."
+    SITE_URL="${WP_HOME:-http://localhost:${PORT}}"
+    ADMIN_USER="${WORDPRESS_ADMIN_USER:-admin}"
+    ADMIN_PASS="${WORDPRESS_ADMIN_PASSWORD:-changeme}"
+    ADMIN_EMAIL="${WORDPRESS_ADMIN_EMAIL:-admin@example.com}"
+    SITE_TITLE="${WORDPRESS_SITE_TITLE:-Blue Gecko Games}"
+
+    su -s /bin/sh www-data -c "wp core install \
+        --path=/var/www/html \
+        --url='${SITE_URL}' \
+        --title='${SITE_TITLE}' \
+        --admin_user='${ADMIN_USER}' \
+        --admin_password='${ADMIN_PASS}' \
+        --admin_email='${ADMIN_EMAIL}' \
+        --skip-email" \
+    && echo "WordPress installed successfully." \
+    || echo "WARNING: WordPress auto-install failed. Manual setup may be required."
+fi
 
 exec apache2-foreground
 ENTRY
