@@ -73,6 +73,14 @@ RUN { \
 # Copy built WordPress from builder stage
 COPY --from=builder /app/build/ /var/www/html/
 
+# Grunt excludes index.php and _index.php from the build, then re-adds them
+# via a files-object mapping that doesn't always work. Create them directly.
+RUN printf '%s\n' \
+  '<?php' \
+  'define( "WP_USE_THEMES", true );' \
+  'require __DIR__ . "/wp-blog-header.php";' \
+  > /var/www/html/index.php
+
 # Generate wp-config.php (can't rely on git since .gitignore excludes it)
 RUN cat > /var/www/html/wp-config.php <<'WPCONFIG'
 <?php
@@ -120,28 +128,9 @@ WPCONFIG
 # Set proper ownership
 RUN chown -R www-data:www-data /var/www/html
 
-# Entrypoint: create index.php at runtime, then start Apache
-RUN cat > /usr/local/bin/wordpress-entrypoint.sh <<'ENTRY'
-#!/bin/sh
-echo "=== Container starting ==="
-
-# Create index.php at runtime (Grunt build excludes it)
-if [ ! -f /var/www/html/index.php ]; then
-    echo "Creating /var/www/html/index.php..."
-    cat > /var/www/html/index.php <<'PHP'
-<?php
-define( 'WP_USE_THEMES', true );
-require __DIR__ . '/wp-blog-header.php';
-PHP
-    chown www-data:www-data /var/www/html/index.php
-fi
-
-echo "index.php exists: $(ls -la /var/www/html/index.php 2>&1)"
-echo "Files in docroot: $(ls /var/www/html/ | head -10)"
-
-exec apache2-foreground
-ENTRY
-RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh
+# Fix MPM at startup: ensure only mpm_prefork is loaded (required for mod_php)
+RUN printf '#!/bin/sh\nrm -f /etc/apache2/mods-enabled/mpm_event.* /etc/apache2/mods-enabled/mpm_worker.*\nln -sf /etc/apache2/mods-available/mpm_prefork.load /etc/apache2/mods-enabled/mpm_prefork.load\nln -sf /etc/apache2/mods-available/mpm_prefork.conf /etc/apache2/mods-enabled/mpm_prefork.conf\nexec apache2-foreground\n' > /usr/local/bin/wordpress-entrypoint.sh && \
+    chmod +x /usr/local/bin/wordpress-entrypoint.sh
 
 EXPOSE 80
 CMD ["wordpress-entrypoint.sh"]
