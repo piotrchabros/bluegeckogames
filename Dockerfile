@@ -62,16 +62,9 @@ RUN sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/Allo
 # Copy built WordPress from builder stage
 COPY --from=builder /app/build/ /var/www/html/
 
-# Grunt excludes index.php and _index.php from the build, then re-adds them
-# via a files-object mapping that doesn't always work. Create them directly.
-RUN printf '%s\n' \
-  '<?php' \
-  'define( "WP_USE_THEMES", true );' \
-  'require __DIR__ . "/wp-blog-header.php";' \
-  > /var/www/html/index.php
-
-# Debug: list root of document root so we can see what the build produced
-RUN ls -la /var/www/html/ && echo "---wp-admin---" && ls /var/www/html/wp-admin/ | head -20 || true
+# Ensure index.php exists (Grunt's files-object mapping may not produce it)
+COPY --from=builder /app/src/_index.php /var/www/html/index.php
+COPY --from=builder /app/src/wp-admin/_index.php /var/www/html/wp-admin/index.php
 
 # Generate wp-config.php (can't rely on git since .gitignore excludes it)
 RUN cat > /var/www/html/wp-config.php <<'WPCONFIG'
