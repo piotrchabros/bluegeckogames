@@ -109,9 +109,26 @@ WPCONFIG
 # Set proper ownership
 RUN chown -R www-data:www-data /var/www/html
 
-# Fix MPM at startup: ensure only mpm_prefork is loaded (required for mod_php)
-RUN printf '#!/bin/sh\nrm -f /etc/apache2/mods-enabled/mpm_event.* /etc/apache2/mods-enabled/mpm_worker.*\nln -sf /etc/apache2/mods-available/mpm_prefork.load /etc/apache2/mods-enabled/mpm_prefork.load\nln -sf /etc/apache2/mods-available/mpm_prefork.conf /etc/apache2/mods-enabled/mpm_prefork.conf\nexec apache2-foreground\n' > /usr/local/bin/wordpress-entrypoint.sh && \
-    chmod +x /usr/local/bin/wordpress-entrypoint.sh
+# Entrypoint: configure Apache port from $PORT, fix MPM, then start
+RUN cat > /usr/local/bin/wordpress-entrypoint.sh <<'ENTRY'
+#!/bin/sh
+set -e
+
+# Railway sets PORT; default to 80 if unset
+PORT="${PORT:-80}"
+
+# Make Apache listen on the correct port
+sed -i "s/Listen 80/Listen ${PORT}/" /etc/apache2/ports.conf
+sed -i "s/<VirtualHost \*:80>/<VirtualHost *:${PORT}>/" /etc/apache2/sites-enabled/000-default.conf
+
+# Ensure only mpm_prefork is loaded (required for mod_php)
+rm -f /etc/apache2/mods-enabled/mpm_event.* /etc/apache2/mods-enabled/mpm_worker.*
+ln -sf /etc/apache2/mods-available/mpm_prefork.load /etc/apache2/mods-enabled/mpm_prefork.load
+ln -sf /etc/apache2/mods-available/mpm_prefork.conf /etc/apache2/mods-enabled/mpm_prefork.conf
+
+exec apache2-foreground
+ENTRY
+RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh
 
 EXPOSE 80
 CMD ["wordpress-entrypoint.sh"]
