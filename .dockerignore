@@ -1,0 +1,8 @@
+node_modules
+gutenberg
+build
+.git
+.idea
+.DS_Store
+coverage
+artifacts
