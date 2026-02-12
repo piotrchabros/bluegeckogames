@@ -62,10 +62,6 @@ RUN sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/Allo
 # Copy built WordPress from builder stage
 COPY --from=builder /app/build/ /var/www/html/
 
-# Ensure index.php exists (Grunt's files-object mapping may not produce it)
-COPY --from=builder /app/src/_index.php /var/www/html/index.php
-COPY --from=builder /app/src/wp-admin/_index.php /var/www/html/wp-admin/index.php
-
 # Generate wp-config.php (can't rely on git since .gitignore excludes it)
 RUN cat > /var/www/html/wp-config.php <<'WPCONFIG'
 <?php
