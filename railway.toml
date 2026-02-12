@@ -5,5 +5,5 @@ dockerfilePath = "Dockerfile"
 [deploy]
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
-healthcheckPath = "/healthz.php"
-healthcheckTimeout = 300
+healthcheckPath = "/"
+healthcheckTimeout = 30
