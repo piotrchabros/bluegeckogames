@@ -121,35 +121,47 @@ RUN chown -R www-data:www-data /var/www/html
 RUN echo '<?php http_response_code(200); echo "ok";' > /var/www/html/healthz.php \
     && chown www-data:www-data /var/www/html/healthz.php
 
-# Entrypoint: configure Apache port, start Apache immediately, then set up WP in background
-RUN cat > /usr/local/bin/wp-setup-background.sh <<'BGSCRIPT'
+# Entrypoint: wait for DB, install WP if needed, configure Apache port, then start
+RUN cat > /usr/local/bin/wordpress-entrypoint.sh <<'ENTRY'
 #!/bin/sh
-# Background script: wait for DB and install WordPress
-# This runs AFTER Apache is already serving requests
+set -e
 
-sleep 5  # Give Apache a moment to fully start
+# Railway sets PORT; default to 80 if unset
+PORT="${PORT:-80}"
 
+# Make Apache listen on the correct port
+sed -i "s/Listen 80/Listen ${PORT}/" /etc/apache2/ports.conf
+sed -i "s/<VirtualHost \*:80>/<VirtualHost *:${PORT}>/" /etc/apache2/sites-enabled/000-default.conf
+
+# Ensure only mpm_prefork is loaded (required for mod_php)
+rm -f /etc/apache2/mods-enabled/mpm_event.* /etc/apache2/mods-enabled/mpm_worker.*
+ln -sf /etc/apache2/mods-available/mpm_prefork.load /etc/apache2/mods-enabled/mpm_prefork.load
+ln -sf /etc/apache2/mods-available/mpm_prefork.conf /etc/apache2/mods-enabled/mpm_prefork.conf
+
+# Wait for MySQL to be reachable (up to 60 seconds)
+echo "Waiting for database..."
 DB_HOST=$(php -r "echo getenv('WORDPRESS_DB_HOST') ?: 'localhost';")
 DB_USER=$(php -r "echo getenv('WORDPRESS_DB_USER') ?: 'root';")
 DB_PASS=$(php -r "echo getenv('WORDPRESS_DB_PASSWORD') ?: '';")
+DB_NAME=$(php -r "echo getenv('WORDPRESS_DB_NAME') ?: 'wordpress';")
 
-echo "[wp-setup] Waiting for database at $DB_HOST..."
 ATTEMPTS=0
 MAX_ATTEMPTS=30
 until mysqladmin ping -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" --silent 2>/dev/null; do
     ATTEMPTS=$((ATTEMPTS + 1))
     if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
-        echo "[wp-setup] ERROR: Database not reachable after ${MAX_ATTEMPTS} attempts. Giving up."
-        exit 1
+        echo "ERROR: Database not reachable after ${MAX_ATTEMPTS} attempts. Starting Apache anyway..."
+        break
     fi
-    echo "[wp-setup]   DB not ready (attempt $ATTEMPTS/$MAX_ATTEMPTS)..."
+    echo "  DB not ready yet (attempt $ATTEMPTS/$MAX_ATTEMPTS)..."
     sleep 2
 done
-echo "[wp-setup] Database is reachable."
+echo "Database is reachable."
 
+# Auto-install WordPress if tables don't exist yet
 if ! su -s /bin/sh www-data -c "wp core is-installed --path=/var/www/html" 2>/dev/null; then
-    echo "[wp-setup] WordPress not installed. Running auto-install..."
-    SITE_URL="${WP_HOME:-http://localhost}"
+    echo "WordPress not installed. Running auto-install..."
+    SITE_URL="${WP_HOME:-http://localhost:${PORT}}"
     ADMIN_USER="${WORDPRESS_ADMIN_USER:-admin}"
     ADMIN_PASS="${WORDPRESS_ADMIN_PASSWORD:-changeme}"
     ADMIN_EMAIL="${WORDPRESS_ADMIN_EMAIL:-admin@example.com}"
@@ -163,35 +175,10 @@ if ! su -s /bin/sh www-data -c "wp core is-installed --path=/var/www/html" 2>/de
         --admin_password='${ADMIN_PASS}' \
         --admin_email='${ADMIN_EMAIL}' \
         --skip-email" \
-    && echo "[wp-setup] WordPress installed successfully." \
-    || echo "[wp-setup] WARNING: WordPress auto-install failed."
-else
-    echo "[wp-setup] WordPress is already installed."
+    && echo "WordPress installed successfully." \
+    || echo "WARNING: WordPress auto-install failed. Manual setup may be required."
 fi
-BGSCRIPT
-RUN chmod +x /usr/local/bin/wp-setup-background.sh
 
-RUN cat > /usr/local/bin/wordpress-entrypoint.sh <<'ENTRY'
-#!/bin/sh
-set -e
-
-# Railway sets PORT; default to 80 if unset
-PORT="${PORT:-80}"
-echo "Configuring Apache to listen on port ${PORT}..."
-
-# Make Apache listen on the correct port
-sed -i "s/Listen 80/Listen ${PORT}/" /etc/apache2/ports.conf
-sed -i "s/<VirtualHost \*:80>/<VirtualHost *:${PORT}>/" /etc/apache2/sites-enabled/000-default.conf
-
-# Ensure only mpm_prefork is loaded (required for mod_php)
-rm -f /etc/apache2/mods-enabled/mpm_event.* /etc/apache2/mods-enabled/mpm_worker.*
-ln -sf /etc/apache2/mods-available/mpm_prefork.load /etc/apache2/mods-enabled/mpm_prefork.load
-ln -sf /etc/apache2/mods-available/mpm_prefork.conf /etc/apache2/mods-enabled/mpm_prefork.conf
-
-# Launch DB wait + WP install in the background so Apache starts immediately
-/usr/local/bin/wp-setup-background.sh &
-
-echo "Starting Apache on port ${PORT}..."
 exec apache2-foreground
 ENTRY
 RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh
