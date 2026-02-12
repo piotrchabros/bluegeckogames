@@ -56,35 +56,26 @@ RUN { \
     echo 'opcache.revalidate_freq=2'; \
 } > /usr/local/etc/php/conf.d/opcache-recommended.ini
 
-# Write explicit Apache vhost config (Debian Trixie defaults may differ)
-RUN { \
-    echo '<VirtualHost *:80>'; \
-    echo '    DocumentRoot /var/www/html'; \
-    echo '    <Directory /var/www/html>'; \
-    echo '        Options FollowSymLinks'; \
-    echo '        AllowOverride All'; \
-    echo '        Require all granted'; \
-    echo '    </Directory>'; \
-    echo '    ErrorLog ${APACHE_LOG_DIR}/error.log'; \
-    echo '    CustomLog ${APACHE_LOG_DIR}/access.log combined'; \
-    echo '</VirtualHost>'; \
-} > /etc/apache2/sites-enabled/000-default.conf
+# Configure Apache: allow .htaccess overrides in /var/www/
+RUN sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
 
 # Copy built WordPress from builder stage
 COPY --from=builder /app/build/ /var/www/html/
 
-# Grunt excludes index.php and _index.php from the build, then re-adds them
-# via a files-object mapping that doesn't always work. Create them directly.
+# Grunt excludes index.php from the build output. Create the WordPress
+# front controller directly (same content as src/_index.php).
 RUN printf '%s\n' \
   '<?php' \
   'define( "WP_USE_THEMES", true );' \
   'require __DIR__ . "/wp-blog-header.php";' \
   > /var/www/html/index.php
 
-# Generate wp-config.php (can't rely on git since .gitignore excludes it)
+# Simple healthcheck endpoint that does not load WordPress
+RUN echo '<?php http_response_code(200); echo "ok";' > /var/www/html/healthz.php
+
+# Generate wp-config.php from environment variables at runtime
 RUN cat > /var/www/html/wp-config.php <<'WPCONFIG'
 <?php
-// Database settings - reads WORDPRESS_DB_* env vars from Railway
 define('DB_NAME',     getenv('WORDPRESS_DB_NAME')     ?: 'wordpress');
 define('DB_USER',     getenv('WORDPRESS_DB_USER')     ?: 'root');
 define('DB_PASSWORD', getenv('WORDPRESS_DB_PASSWORD') ?: '');
@@ -92,7 +83,6 @@ define('DB_HOST',     getenv('WORDPRESS_DB_HOST')     ?: 'localhost');
 define('DB_CHARSET',  'utf8mb4');
 define('DB_COLLATE',  '');
 
-// Authentication keys and salts
 define('AUTH_KEY',         getenv('WORDPRESS_AUTH_KEY')         ?: 'put-unique-phrase-here');
 define('SECURE_AUTH_KEY',  getenv('WORDPRESS_SECURE_AUTH_KEY')  ?: 'put-unique-phrase-here');
 define('LOGGED_IN_KEY',    getenv('WORDPRESS_LOGGED_IN_KEY')    ?: 'put-unique-phrase-here');
@@ -106,12 +96,10 @@ $table_prefix = getenv('WORDPRESS_TABLE_PREFIX') ?: 'wp_';
 
 define('WP_DEBUG', filter_var(getenv('WP_DEBUG') ?: 'false', FILTER_VALIDATE_BOOLEAN));
 
-// Force HTTPS behind Railway's proxy
 if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
     $_SERVER['HTTPS'] = 'on';
 }
 
-// Set site URL from Railway's domain
 if (getenv('RAILWAY_PUBLIC_DOMAIN')) {
     define('DOMAIN_CURRENT_SITE', getenv('RAILWAY_PUBLIC_DOMAIN'));
     define('WP_HOME', 'https://' . getenv('RAILWAY_PUBLIC_DOMAIN'));
@@ -128,9 +116,19 @@ WPCONFIG
 # Set proper ownership
 RUN chown -R www-data:www-data /var/www/html
 
-# Fix MPM at startup: ensure only mpm_prefork is loaded (required for mod_php)
-RUN printf '#!/bin/sh\nrm -f /etc/apache2/mods-enabled/mpm_event.* /etc/apache2/mods-enabled/mpm_worker.*\nln -sf /etc/apache2/mods-available/mpm_prefork.load /etc/apache2/mods-enabled/mpm_prefork.load\nln -sf /etc/apache2/mods-available/mpm_prefork.conf /etc/apache2/mods-enabled/mpm_prefork.conf\nexec apache2-foreground\n' > /usr/local/bin/wordpress-entrypoint.sh && \
-    chmod +x /usr/local/bin/wordpress-entrypoint.sh
+# Entrypoint: handle Railway PORT, then start Apache
+RUN cat > /usr/local/bin/wordpress-entrypoint.sh <<'ENTRY'
+#!/bin/sh
+PORT="${PORT:-80}"
+echo "Starting WordPress on port ${PORT}..."
+
+# Update Apache to listen on Railway's assigned port
+sed -i "s/Listen 80/Listen ${PORT}/g" /etc/apache2/ports.conf
+sed -i "s/:80>/:${PORT}>/g" /etc/apache2/sites-enabled/000-default.conf
+
+exec apache2-foreground
+ENTRY
+RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh
 
 EXPOSE 80
 CMD ["wordpress-entrypoint.sh"]
