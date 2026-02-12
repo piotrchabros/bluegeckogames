@@ -56,19 +56,8 @@ RUN { \
     echo 'opcache.revalidate_freq=2'; \
 } > /usr/local/etc/php/conf.d/opcache-recommended.ini
 
-# Write explicit Apache vhost config (Debian Trixie defaults may differ)
-RUN { \
-    echo '<VirtualHost *:80>'; \
-    echo '    DocumentRoot /var/www/html'; \
-    echo '    <Directory /var/www/html>'; \
-    echo '        Options FollowSymLinks'; \
-    echo '        AllowOverride All'; \
-    echo '        Require all granted'; \
-    echo '    </Directory>'; \
-    echo '    ErrorLog ${APACHE_LOG_DIR}/error.log'; \
-    echo '    CustomLog ${APACHE_LOG_DIR}/access.log combined'; \
-    echo '</VirtualHost>'; \
-} > /etc/apache2/sites-enabled/000-default.conf
+# Configure Apache to allow .htaccess overrides
+RUN sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/apache2.conf
 
 # Copy built WordPress from builder stage
 COPY --from=builder /app/build/ /var/www/html/
@@ -80,6 +69,9 @@ RUN printf '%s\n' \
   'define( "WP_USE_THEMES", true );' \
   'require __DIR__ . "/wp-blog-header.php";' \
   > /var/www/html/index.php
+
+# Debug: list root of document root so we can see what the build produced
+RUN ls -la /var/www/html/ && echo "---wp-admin---" && ls /var/www/html/wp-admin/ | head -20 || true
 
 # Generate wp-config.php (can't rely on git since .gitignore excludes it)
 RUN cat > /var/www/html/wp-config.php <<'WPCONFIG'
